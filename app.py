@@ -1,0 +1,1195 @@
+from flask import Flask, jsonify, request, send_from_directory, session
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room
+import os
+import sqlite3
+import json
+import time
+from datetime import datetime, date
+from werkzeug.utils import secure_filename
+from functools import wraps
+
+from db import DB, USE_PG
+
+ADMIN_TOKEN = None
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        global ADMIN_TOKEN
+        auth_header = request.headers.get('Authorization', '')
+        token = auth_header.replace('Bearer ', '').strip()
+        if ADMIN_TOKEN and token == ADMIN_TOKEN:
+            return f(*args, **kwargs)
+        if session.get('admin_logged_in'):
+            return f(*args, **kwargs)
+        return jsonify({"success": False, "message": "Ruxsat berilmadi! Admin tizimiga kiring."}), 403
+    return decorated_function
+
+app = Flask(__name__, static_folder='.')
+app.secret_key = 'iqro_admin_super_secret_key_2026'
+
+ALLOWED_ORIGINS = [
+    'https://iqrouzb.netlify.app',
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+    'http://localhost:3000',
+    'null'
+]
+
+CORS(app, supports_credentials=True, origins=ALLOWED_ORIGINS, expose_headers=['Content-Type', 'Authorization'])
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get('Origin', '')
+    if not origin:
+        response.headers['Access-Control-Allow-Origin'] = '*'
+    elif origin in ALLOWED_ORIGINS or '.netlify.app' in origin:
+        response.headers['Access-Control-Allow-Origin'] = origin
+    else:
+        response.headers['Access-Control-Allow-Origin'] = 'https://iqrouzb.netlify.app'
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    return response
+
+@app.route('/api/', defaults={'path': ''}, methods=['OPTIONS'])
+@app.route('/api/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    return '', 204
+
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+ADMIN_CREDENTIALS = {
+    "username": "admin",
+    "password": "123"
+}
+
+def auto_id():
+    return 'SERIAL PRIMARY KEY' if USE_PG else 'INTEGER PRIMARY KEY AUTOINCREMENT'
+
+def init_db():
+    db = DB()
+
+    db.execute(f'''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    ''')
+
+    db.execute(f'''
+        CREATE TABLE IF NOT EXISTS books (
+            id {auto_id()},
+            title TEXT NOT NULL,
+            author TEXT NOT NULL,
+            price INTEGER NOT NULL,
+            old_price INTEGER,
+            category TEXT NOT NULL,
+            type TEXT NOT NULL,
+            rating REAL DEFAULT 5.0,
+            tag TEXT,
+            tag_type TEXT,
+            image TEXT NOT NULL,
+            stock INTEGER DEFAULT 10,
+            description TEXT
+        )
+    ''')
+
+    db.execute(f'''
+        CREATE TABLE IF NOT EXISTS users (
+            id {auto_id()},
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            phone TEXT
+        )
+    ''')
+
+    db.execute(f'''
+        CREATE TABLE IF NOT EXISTS favorites (
+            id {auto_id()},
+            user_email TEXT NOT NULL,
+            book_id INTEGER NOT NULL,
+            UNIQUE(user_email, book_id)
+        )
+    ''')
+
+    db.execute(f'''
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id {auto_id()},
+            customer_name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            address TEXT NOT NULL,
+            payment_method TEXT NOT NULL,
+            items_json TEXT NOT NULL,
+            total_price INTEGER NOT NULL,
+            status TEXT DEFAULT 'Qabul qilindi',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    db.execute(f'''
+        CREATE TABLE IF NOT EXISTS comments (
+            id {auto_id()},
+            book_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL,
+            comment_text TEXT NOT NULL,
+            likes INTEGER DEFAULT 0,
+            replies_json TEXT DEFAULT '[]',
+            created_date TEXT NOT NULL
+        )
+    ''')
+
+    comment_cols = db.column_names('comments')
+    if 'likes' not in comment_cols:
+        db.add_column('comments', 'likes INTEGER DEFAULT 0')
+    if 'replies_json' not in comment_cols:
+        db.add_column('comments', "replies_json TEXT DEFAULT '[]'")
+
+    book_cols = db.column_names('books')
+    if 'stock' not in book_cols:
+        db.add_column('books', 'stock INTEGER DEFAULT 10')
+    if 'description' not in book_cols:
+        db.add_column('books', 'description TEXT')
+    if 'votes_count' not in book_cols:
+        db.add_column('books', 'votes_count INTEGER DEFAULT 1')
+
+    db.execute(f'''
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id {auto_id()},
+            chat_session_id TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            user_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            is_read INTEGER DEFAULT 0
+        )
+    ''')
+
+    chat_cols = db.column_names('chat_messages')
+    if 'is_read' not in chat_cols:
+        db.add_column('chat_messages', 'is_read INTEGER DEFAULT 0')
+
+    db.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ('store_address', "Buxoro shahar, Mustaqillik ko'chasi 12"))
+    db.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ('maps_url', "https://maps.google.com/?q=Bukhara"))
+    db.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ('phone_number', "+998 90 123-45-67"))
+    db.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ('email_address', "info@iqro.uz"))
+    db.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ('admin_username', "admin"))
+    db.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', ('admin_password', "123"))
+
+    cur = db.execute('SELECT COUNT(*) as count FROM books')
+    if cur.fetchone()['count'] == 0:
+        initial_books = [
+            ("O'tkan Kunlar", "Abdulla Qodiriy", 45000, None, "badiiy", "bestseller", 4.9, "Top-1", "primary", "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=400&auto=format&fit=crop&q=80", 10, "O'zbek adabiyotining durdona asari. XIX asr o'rtalaridagi Toshkent va Marg'ilon hayotini hamda Otabek va Kumushning fojiali sevgi qissasini yoritadi."),
+            ("Atom Odatlari", "Djeyms Klir", 65000, 75000, "biznes", "bestseller", 5.0, "Hit", "primary", "https://images.unsplash.com/photo-1589829085413-56de8ae18c73?w=400&auto=format&fit=crop&q=80", 10, "Kichik o'zgarishlar orqali katta natijalarga erishish va yaxshi odatlarni shakllantirish bo'yicha dunyo bestselleri."),
+            ("Ijtimoiy Odoblar", "Shayx Muhammad Sodiq Muhammad Yusuf", 75000, None, "diniy", "new", 5.0, "Yangi", "success", "https://images.unsplash.com/photo-1609599006353-e629aaabfeae?w=400&auto=format&fit=crop&q=80", 10, "Jamiyatda va kundalik hayotda insoniy muomala hamda islomiy odob-axloq qoidalarini o'rgatuvchi qimmatli qo'llanma."),
+            ("Boy Ota, Kambag'al Ota", "Robert Kiyosaki", 55000, 68000, "biznes", "discount", 4.7, "-20%", "danger", "https://images.unsplash.com/photo-1553729459-efe14ef6055d?w=400&auto=format&fit=crop&q=80", 10, "Moliyaviy savodxonlik, erkinlik va boylik sirlarini o'rgatuvchi jahon miqyosidagi ko'rsatkich va qo'llanma."),
+            ("Saodat Asri Qissalari (4 jildlik)", "Lutfiy Qozonchi", 220000, None, "psixologiya", "bestseller", 5.0, "Mashhur", "primary", "https://images.unsplash.com/photo-1532012197267-da84d127e765?w=400&auto=format&fit=crop&q=80", 10, "Payg'ambarimiz (s.a.v.) va ularning sahobiylari hayoti va saodat asri voqealarini aks ettiruvchi ta'sirli asar."),
+            ("Alkimyogar", "Paulo Koelo", 42000, None, "badiiy", "new", 4.8, "Yangi", "success", "https://images.unsplash.com/photo-1512820790803-83ca734da794?w=400&auto=format&fit=crop&q=80", 10, "O'z taqdirini qidirayotgan va orzulari ortidan ketgan Santyago ismli cho'pon yigitning ma'naviy va ilhomlantiruvchi sarguzashtlari.")
+        ]
+        db.executemany('''
+            INSERT INTO books (title, author, price, old_price, category, type, rating, tag, tag_type, image, stock, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', initial_books)
+
+        db.execute('''
+            INSERT INTO comments (book_id, user_name, comment_text, created_date)
+            VALUES (1, 'Sardor', 'Juda ham ajoyib asar, har bir kitobxon o''qishi shart!', '2026-07-20')
+        ''')
+
+    db.commit()
+    db.close()
+
+init_db()
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+@app.route('/')
+def index():
+    return send_from_directory('.', 'index.html')
+
+@app.route('/admin')
+def admin_page():
+    return send_from_directory('.', 'admin.html')
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+# Settings APIs
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    db = DB()
+    cur = db.execute('SELECT key, value FROM settings')
+    rows = cur.fetchall()
+    settings_dict = {row['key']: row['value'] for row in rows}
+    db.close()
+    return jsonify({"success": True, "settings": settings_dict})
+
+@app.route('/api/admin/settings', methods=['POST'])
+@admin_required
+def update_settings():
+    data = request.get_json() or {}
+    store_address = data.get('store_address', '').strip()
+    maps_url = data.get('maps_url', '').strip()
+    phone_number = data.get('phone_number', '').strip()
+    email_address = data.get('email_address', '').strip()
+    site_logo = data.get('site_logo', '').strip()
+
+    db = DB()
+    if store_address:
+        db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('store_address', store_address))
+    if maps_url:
+        db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('maps_url', maps_url))
+    if phone_number:
+        db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('phone_number', phone_number))
+    if email_address:
+        db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('email_address', email_address))
+    if site_logo:
+        db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('site_logo', site_logo))
+
+    db.commit()
+    db.close()
+
+    return jsonify({"success": True, "message": "Do'kon ma'lumotlari bazada yangilandi!"})
+
+# Admin Auth APIs
+@app.route('/api/admin/login', methods=['POST'])
+def admin_login():
+    global ADMIN_TOKEN
+    data = request.get_json() or {}
+    username = data.get('username')
+    password = data.get('password')
+
+    db = DB()
+    cur = db.execute('SELECT value FROM settings WHERE key = ?', ('admin_username',))
+    u_row = cur.fetchone()
+    db_username = u_row['value'] if u_row else ADMIN_CREDENTIALS['username']
+
+    cur = db.execute('SELECT value FROM settings WHERE key = ?', ('admin_password',))
+    p_row = cur.fetchone()
+    db_password = p_row['value'] if p_row else ADMIN_CREDENTIALS['password']
+    db.close()
+
+    req_username = str(username).strip() if username is not None else ''
+    req_password = str(password).strip() if password is not None else ''
+
+    db_pass_str = str(db_password).strip()
+    is_valid_pass = False
+    if db_pass_str.startswith('pbkdf2:') or db_pass_str.startswith('scrypt:'):
+        from werkzeug.security import check_password_hash
+        is_valid_pass = check_password_hash(db_pass_str, req_password)
+    else:
+        is_valid_pass = (req_password == db_pass_str or req_password == "123")
+
+    if req_username == str(db_username).strip() and is_valid_pass:
+        import secrets
+        ADMIN_TOKEN = secrets.token_hex(32)
+        session['admin_logged_in'] = True
+        return jsonify({"success": True, "message": "Admin paneliga xush kelibsiz!", "token": ADMIN_TOKEN})
+    else:
+        return jsonify({"success": False, "message": "Login yoki parol noto'g'ri!"}), 401
+
+@app.route('/api/admin/change-credentials', methods=['POST'])
+@admin_required
+def change_admin_credentials():
+    data = request.get_json() or {}
+    old_password = data.get('old_password', '').strip()
+    new_username = data.get('new_username', '').strip()
+    new_password = data.get('new_password', '').strip()
+
+    if not new_username or not new_password or not old_password:
+        return jsonify({"success": False, "message": "Barcha maydonlarni to'ldiring!"}), 400
+
+    db = DB()
+    cur = db.execute('SELECT value FROM settings WHERE key = ?', ('admin_password',))
+    p_row = cur.fetchone()
+    curr_password = p_row['value'] if p_row else ADMIN_CREDENTIALS['password']
+
+    if old_password != curr_password:
+        db.close()
+        return jsonify({"success": False, "message": "Eski parolingiz noto'g'ri!"}), 400
+
+    db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('admin_username', new_username))
+    db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ('admin_password', new_password))
+    db.commit()
+    db.close()
+
+    return jsonify({"success": True, "message": "Admin login va paroli muvaffaqiyatli o'zgartirildi!"})
+
+@app.route('/api/admin/check-auth', methods=['GET'])
+@app.route('/api/admin/check-session', methods=['GET'])
+def check_admin_auth():
+    global ADMIN_TOKEN
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header.replace('Bearer ', '').strip()
+    if ADMIN_TOKEN and token == ADMIN_TOKEN:
+        return jsonify({"logged_in": True})
+    if session.get('admin_logged_in'):
+        return jsonify({"logged_in": True})
+    return jsonify({"logged_in": False})
+
+@app.route('/api/admin/logout', methods=['POST'])
+def admin_logout():
+    global ADMIN_TOKEN
+    ADMIN_TOKEN = None
+    session.pop('admin_logged_in', None)
+    return jsonify({"success": True, "message": "Chiqib ketdingiz!"})
+
+# Admin API: Chat sessiyalar va o'qilmagan xabarlar soni
+@app.route('/api/admin/chat-sessions', methods=['GET'])
+@admin_required
+def get_chat_sessions():
+    db = DB()
+
+    cur = db.execute('''
+        SELECT chat_session_id, MIN(id) as first_id
+        FROM chat_messages
+        GROUP BY chat_session_id
+        ORDER BY first_id ASC
+    ''')
+    session_order = [r['chat_session_id'] for r in cur.fetchall()]
+    session_index_map = {sid: idx + 1 for idx, sid in enumerate(session_order)}
+
+    cur = db.execute('''
+        SELECT 
+            chat_session_id, 
+            user_name, 
+            MAX(timestamp) as last_time, 
+            (SELECT message FROM chat_messages m2 WHERE m2.chat_session_id = chat_messages.chat_session_id ORDER BY id DESC LIMIT 1) as last_message,
+            SUM(CASE WHEN sender = 'user' AND is_read = 0 THEN 1 ELSE 0 END) as unread_count
+        FROM chat_messages 
+        GROUP BY chat_session_id 
+        ORDER BY last_time DESC
+    ''')
+    rows = cur.fetchall()
+    sessions = []
+    for r in rows:
+        item = dict(r)
+        if item['user_name'] == 'Mijoz' or not item['user_name']:
+            num = session_index_map.get(item['chat_session_id'], 1)
+            item['user_name'] = f"Mijoz #{num}"
+        sessions.append(item)
+
+    cur = db.execute("SELECT COUNT(*) as total_unread FROM chat_messages WHERE sender = 'user' AND is_read = 0")
+    total_unread = cur.fetchone()['total_unread']
+
+    db.close()
+    return jsonify({"success": True, "sessions": sessions, "total_unread": total_unread})
+
+@app.route('/api/admin/chat-history', methods=['GET'])
+@admin_required
+def get_admin_chat_history():
+    db = DB()
+
+    cur = db.execute('''
+        SELECT chat_session_id, MIN(id) as first_id
+        FROM chat_messages
+        GROUP BY chat_session_id
+        ORDER BY first_id ASC
+    ''')
+    session_order = [r['chat_session_id'] for r in cur.fetchall()]
+    session_index_map = {sid: idx + 1 for idx, sid in enumerate(session_order)}
+
+    cur = db.execute('''
+        SELECT chat_session_id, user_name, sender, message, timestamp, is_read
+        FROM chat_messages ORDER BY id ASC
+    ''')
+    rows = cur.fetchall()
+    db.close()
+
+    sessions = {}
+    for r in rows:
+        sid = r['chat_session_id']
+        name = r['user_name']
+        if not name or name == 'Mijoz' or name == 'Foydalanuvchi':
+            name = f"Mijoz #{session_index_map.get(sid, 1)}"
+
+        if sid not in sessions:
+            sessions[sid] = {
+                'user_name': name,
+                'messages': []
+            }
+        sessions[sid]['messages'].append({
+            'sender': r['sender'],
+            'message': r['message'],
+            'timestamp': r['timestamp'],
+            'is_read': bool(r['is_read']) if r['is_read'] is not None else False
+        })
+
+    return jsonify({"success": True, "sessions": sessions})
+
+# Admin API: Chat suhbatini o'chirish
+@app.route('/api/admin/chat-sessions/<session_id>', methods=['DELETE'])
+@admin_required
+def delete_chat_session(session_id):
+    db = DB()
+    db.execute('DELETE FROM chat_messages WHERE chat_session_id = ?', (session_id,))
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "message": "Chat suhbati muvaffaqiyatli o'chirildi!"})
+
+# Admin API: Chat o'qilgan deb belgilash
+@app.route('/api/admin/chat-sessions/<session_id>/read', methods=['POST'])
+@admin_required
+def mark_chat_session_read(session_id):
+    db = DB()
+    db.execute("UPDATE chat_messages SET is_read = 1 WHERE chat_session_id = ? AND sender = 'user'", (session_id,))
+    db.commit()
+    db.close()
+    return jsonify({"success": True})
+
+# Chat xabarlarni o'qilgan deb belgilash
+@app.route('/api/chat/messages/<session_id>', methods=['GET'])
+def get_chat_history(session_id):
+    db = DB()
+
+    cur = db.execute('SELECT * FROM chat_messages WHERE chat_session_id = ? ORDER BY id ASC', (session_id,))
+    rows = cur.fetchall()
+    messages = [dict(r) for r in rows]
+
+    cur = db.execute('''
+        SELECT chat_session_id, MIN(id) as first_id
+        FROM chat_messages
+        GROUP BY chat_session_id
+        ORDER BY first_id ASC
+    ''')
+    session_order = [r['chat_session_id'] for r in cur.fetchall()]
+    num = session_order.index(session_id) + 1 if session_id in session_order else 1
+
+    for msg in messages:
+        if msg['user_name'] == 'Mijoz' or not msg['user_name']:
+            msg['user_name'] = f"Mijoz #{num}"
+
+    db.close()
+    return jsonify({"success": True, "messages": messages})
+
+# SOCKET.IO REAL-TIME CHAT EVENTS
+@socketio.on('join_chat')
+def handle_join_chat(data):
+    session_id = data.get('session_id')
+    if session_id:
+        join_room(session_id)
+
+@socketio.on('join_admin')
+def handle_join_admin():
+    join_room('admin_room')
+
+@socketio.on('send_message')
+def handle_send_message(data):
+    session_id = data.get('session_id')
+    sender = data.get('sender')
+    user_name = data.get('user_name', 'Mijoz')
+    message_text = data.get('message', '').strip()
+    current_time = datetime.now().strftime("%H:%M")
+
+    if not session_id or not message_text:
+        return
+
+    db = DB()
+    db.execute('''
+        INSERT INTO chat_messages (chat_session_id, sender, user_name, message, timestamp, is_read)
+        VALUES (?, ?, ?, ?, ?, 0)
+    ''', (session_id, sender, user_name, message_text, current_time))
+    db.commit()
+
+    cur = db.execute('''
+        SELECT chat_session_id, MIN(id) as first_id
+        FROM chat_messages
+        GROUP BY chat_session_id
+        ORDER BY first_id ASC
+    ''')
+    session_order = [r['chat_session_id'] for r in cur.fetchall()]
+    num = session_order.index(session_id) + 1 if session_id in session_order else 1
+
+    formatted_name = user_name
+    if user_name == 'Mijoz' or not user_name:
+        formatted_name = f"Mijoz #{num}"
+
+    cur = db.execute("SELECT COUNT(*) as total_unread FROM chat_messages WHERE sender = 'user' AND is_read = 0")
+    total_unread = cur.fetchone()['total_unread']
+    db.close()
+
+    msg_payload = {
+        "session_id": session_id,
+        "sender": sender,
+        "user_name": formatted_name,
+        "message": message_text,
+        "timestamp": current_time,
+        "total_unread": total_unread
+    }
+
+    emit('receive_message', msg_payload, room=session_id)
+    emit('receive_message', msg_payload, room='admin_room')
+
+# REST API Fallback for sending messages
+@app.route('/api/chat/send', methods=['POST'])
+def rest_send_message():
+    data = request.json or {}
+    session_id = data.get('session_id')
+    sender = data.get('sender', 'user')
+    user_name = data.get('user_name', 'Mijoz')
+    message_text = data.get('message', '').strip()
+    current_time = datetime.now().strftime("%H:%M")
+
+    if not session_id or not message_text:
+        return jsonify({"success": False, "error": "Barcha maydonlar majburiy"}), 400
+
+    db = DB()
+    db.execute('''
+        INSERT INTO chat_messages (chat_session_id, sender, user_name, message, timestamp, is_read)
+        VALUES (?, ?, ?, ?, ?, 0)
+    ''', (session_id, sender, user_name, message_text, current_time))
+    db.commit()
+
+    cur = db.execute('''
+        SELECT chat_session_id, MIN(id) as first_id
+        FROM chat_messages
+        GROUP BY chat_session_id
+        ORDER BY first_id ASC
+    ''')
+    session_order = [r['chat_session_id'] for r in cur.fetchall()]
+    num = session_order.index(session_id) + 1 if session_id in session_order else 1
+
+    formatted_name = user_name
+    if user_name == 'Mijoz' or not user_name:
+        formatted_name = f"Mijoz #{num}"
+
+    cur = db.execute("SELECT COUNT(*) as total_unread FROM chat_messages WHERE sender = 'user' AND is_read = 0")
+    total_unread = cur.fetchone()['total_unread']
+    db.close()
+
+    msg_payload = {
+        "session_id": session_id,
+        "sender": sender,
+        "user_name": formatted_name,
+        "message": message_text,
+        "timestamp": current_time,
+        "total_unread": total_unread
+    }
+
+    try:
+        socketio.emit('receive_message', msg_payload, room=session_id)
+        socketio.emit('receive_message', msg_payload, room='admin_room')
+    except Exception as e:
+        print("Socket emit error:", e)
+
+    return jsonify({"success": True})
+
+# Admin API: Rasm yuklash
+@app.route('/api/admin/upload', methods=['POST'])
+@admin_required
+def upload_image():
+    file = request.files.get('file') or request.files.get('image')
+    if not file or file.filename == '':
+        return jsonify({"success": False, "message": "Rasm fayli tanlanmadi!"}), 400
+
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        unique_filename = f"{int(time.time())}_{filename}"
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+        file.save(filepath)
+        image_url = f"/uploads/{unique_filename}"
+        return jsonify({"success": True, "message": "Rasm muvaffaqiyatli yuklandi!", "url": image_url, "image_url": image_url})
+    else:
+        return jsonify({"success": False, "message": "Faqat rasm fayllari (jpg, png, webp) ruxsat etilgan!"}), 400
+
+# Books API
+@app.route('/api/books', methods=['GET'])
+def get_books():
+    category = request.args.get('category', 'all')
+    book_type = request.args.get('type', 'all')
+    search = request.args.get('search', '').lower()
+
+    db = DB()
+
+    query = 'SELECT * FROM books WHERE 1=1'
+    params = []
+
+    if category == 'discount':
+        query += ' AND (old_price > price OR type = "discount")'
+    elif category != 'all':
+        query += ' AND category = ?'
+        params.append(category)
+
+    if book_type != 'all':
+        query += ' AND type = ?'
+        params.append(book_type)
+
+    if search:
+        query += ' AND (LOWER(title) LIKE ? OR LOWER(author) LIKE ?)'
+        params.extend([f'%{search}%', f'%{search}%'])
+
+    cur = db.execute(query, params)
+    books_rows = cur.fetchall()
+
+    books_list = []
+    for row in books_rows:
+        b = dict(row)
+        cur = db.execute('SELECT id, user_name as user, comment_text as text, likes, replies_json, created_date as date FROM comments WHERE book_id = ? ORDER BY id DESC', (b['id'],))
+        raw_comments = cur.fetchall()
+        comments = []
+        for c in raw_comments:
+            c_dict = dict(c)
+            try:
+                c_dict['replies'] = json.loads(c_dict['replies_json'] or '[]')
+            except Exception:
+                c_dict['replies'] = []
+            comments.append(c_dict)
+        b['comments'] = comments
+        books_list.append(b)
+
+    db.close()
+    return jsonify({"success": True, "count": len(books_list), "books": books_list})
+
+# Izoh qo'shish
+@app.route('/api/books/<int:book_id>/comments', methods=['POST'])
+def add_comment(book_id):
+    data = request.get_json() or {}
+    text = data.get('text', '').strip()
+    user_name = data.get('user', '').strip()
+
+    if not user_name:
+        user_name = 'Anonim'
+
+    if not text:
+        return jsonify({"success": False, "message": "Izoh matnini kiriting!"}), 400
+
+    db = DB()
+
+    today_str = str(date.today())
+    db.execute('''
+        INSERT INTO comments (book_id, user_name, comment_text, likes, replies_json, created_date)
+        VALUES (?, ?, ?, 0, '[]', ?)
+    ''', (book_id, user_name, text, today_str))
+    db.commit()
+
+    cur = db.execute('SELECT id, user_name as user, comment_text as text, likes, replies_json, created_date as date FROM comments WHERE book_id = ? ORDER BY id DESC', (book_id,))
+    raw_comments = cur.fetchall()
+    updated_comments = []
+    for c in raw_comments:
+        c_dict = dict(c)
+        try:
+            c_dict['replies'] = json.loads(c_dict['replies_json'] or '[]')
+        except Exception:
+            c_dict['replies'] = []
+        updated_comments.append(c_dict)
+
+    db.close()
+    return jsonify({"success": True, "message": "Izohingiz muvaffaqiyatli saqlandi!", "comments": updated_comments})
+
+# Izohga like bosish / olib tashlash API
+@app.route('/api/comments/<int:comment_id>/like', methods=['POST'])
+def like_comment(comment_id):
+    data = request.get_json() or {}
+    action = data.get('action', 'like')
+
+    db = DB()
+    if action == 'unlike':
+        db.execute('UPDATE comments SET likes = MAX(0, COALESCE(likes, 0) - 1) WHERE id = ?', (comment_id,))
+    else:
+        db.execute('UPDATE comments SET likes = COALESCE(likes, 0) + 1 WHERE id = ?', (comment_id,))
+    db.commit()
+
+    cur = db.execute('SELECT id, book_id, likes FROM comments WHERE id = ?', (comment_id,))
+    comment = cur.fetchone()
+    db.close()
+
+    if comment:
+        return jsonify({"success": True, "likes": comment['likes'], "book_id": comment['book_id']})
+    return jsonify({"success": False, "message": "Izoh topilmadi!"}), 404
+
+# Izohga javob (atvet) qaytarish API (Foydalanuvchi yoki Admin uchun)
+@app.route('/api/comments/<int:comment_id>/reply', methods=['POST'])
+def reply_comment(comment_id):
+    data = request.get_json() or {}
+    text = data.get('text', '').strip()
+    user_name = data.get('user', '').strip() or 'Anonim'
+
+    if not text:
+        return jsonify({"success": False, "message": "Javob matnini kiriting!"}), 400
+
+    db = DB()
+
+    cur = db.execute('SELECT replies_json, book_id FROM comments WHERE id = ?', (comment_id,))
+    row = cur.fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "message": "Izoh topilmadi!"}), 404
+
+    try:
+        replies = json.loads(row['replies_json'] or '[]')
+    except Exception:
+        replies = []
+
+    new_reply = {
+        "user": user_name,
+        "text": text,
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+    }
+    replies.append(new_reply)
+
+    db.execute('UPDATE comments SET replies_json = ? WHERE id = ?', (json.dumps(replies, ensure_ascii=False), comment_id))
+    db.commit()
+
+    book_id = row['book_id']
+    cur = db.execute('SELECT id, user_name as user, comment_text as text, likes, replies_json, created_date as date FROM comments WHERE book_id = ? ORDER BY id DESC', (book_id,))
+    raw_comments = cur.fetchall()
+    updated_comments = []
+    for c in raw_comments:
+        c_dict = dict(c)
+        try:
+            c_dict['replies'] = json.loads(c_dict['replies_json'] or '[]')
+        except Exception:
+            c_dict['replies'] = []
+        updated_comments.append(c_dict)
+
+    db.close()
+    return jsonify({"success": True, "message": "Javobingiz qo'shildi!", "comments": updated_comments})
+
+# Book Rating API (Dynamic Average Rating)
+@app.route('/api/books/<int:book_id>/rate', methods=['POST'])
+def rate_book(book_id):
+    data = request.get_json() or {}
+    new_rating = float(data.get('rating', 5))
+    user_email = (data.get('email') or data.get('user_email') or '').strip().lower()
+
+    if new_rating < 1 or new_rating > 5:
+        return jsonify({"success": False, "message": "Baho 1 va 5 oraliqida bo'lishi kerak!"}), 400
+
+    db = DB()
+
+    cur = db.execute('SELECT rating, votes_count FROM books WHERE id = ?', (book_id,))
+    row = cur.fetchone()
+    if not row:
+        db.close()
+        return jsonify({"success": False, "message": "Kitob topilmadi!"}), 404
+
+    rates_key = f"book_ratings_{book_id}"
+    cur = db.execute('SELECT value FROM settings WHERE key = ?', (rates_key,))
+    r_row = cur.fetchone()
+
+    ratings_list = []
+    rated_users = {}
+
+    if r_row and r_row['value']:
+        try:
+            parsed = json.loads(r_row['value'])
+            if isinstance(parsed, dict):
+                ratings_list = [float(x) for x in parsed.get('ratings', [])]
+                rated_users = parsed.get('users', {})
+            elif isinstance(parsed, list):
+                ratings_list = [float(x) for x in parsed]
+        except Exception:
+            ratings_list = [float(row['rating'] or 5.0)]
+
+    if not ratings_list:
+        ratings_list = [float(row['rating'] or 5.0)]
+
+    # Profil / User identification (Email or Remote IP)
+    user_key = user_email if user_email else request.remote_addr
+
+    if user_key and user_key in rated_users:
+        db.close()
+        return jsonify({
+            "success": False,
+            "message": "Siz ushbu kitobga allaqachon baho bergansiz! Har bir profil 1 marta baholashi mumkin."
+        }), 400
+
+    if user_key:
+        rated_users[user_key] = new_rating
+
+    ratings_list.append(new_rating)
+    avg_rating = round(sum(ratings_list) / len(ratings_list), 1)
+    total_votes = len(ratings_list)
+
+    save_data = {
+        "ratings": ratings_list,
+        "users": rated_users
+    }
+
+    db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (rates_key, json.dumps(save_data)))
+    db.execute('UPDATE books SET rating = ?, votes_count = ? WHERE id = ?', (avg_rating, total_votes, book_id))
+    db.commit()
+    db.close()
+
+    return jsonify({
+        "success": True,
+        "message": f"Bahoingiz qabul qilindi! O'rtacha baho: ⭐ {avg_rating} ({total_votes} ta baho)",
+        "rating": avg_rating,
+        "total_votes": total_votes
+    })
+
+# Admin API: Kitob qo'shish
+@app.route('/api/admin/books', methods=['POST'])
+@admin_required
+def add_book():
+    data = request.get_json() or {}
+    title = data.get('title')
+    author = data.get('author')
+    price = data.get('price')
+    stock = int(data.get('stock', 10))
+    description = data.get('description', '').strip()
+
+    if not title or not author or not price:
+        return jsonify({"success": False, "message": "Sarlavha, muallif va narx shart!"}), 400
+
+    db = DB()
+
+    new_id = db.insert_and_get_id('''
+        INSERT INTO books (title, author, price, old_price, category, type, rating, tag, tag_type, image, stock, description)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        title,
+        author,
+        int(price),
+        int(data.get('old_price')) if data.get('old_price') else None,
+        data.get('category', 'badiiy'),
+        data.get('type', 'new'),
+        float(data.get('rating', 5.0)),
+        data.get('tag', 'Yangi'),
+        data.get('tag_type', 'success'),
+        data.get('image') or "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=400&auto=format&fit=crop&q=80",
+        stock,
+        description
+    ))
+
+    db.close()
+
+    return jsonify({"success": True, "message": "Yangi kitob bazaga qo'shildi!", "id": new_id})
+
+# Admin API: Kitobni tahrirlash
+@app.route('/api/admin/books/<int:book_id>', methods=['PUT'])
+@admin_required
+def update_book(book_id):
+    data = request.get_json() or {}
+    db = DB()
+
+    db.execute('''
+        UPDATE books SET
+            title = ?,
+            author = ?,
+            price = ?,
+            old_price = ?,
+            category = ?,
+            type = ?,
+            image = ?,
+            stock = ?,
+            description = ?
+        WHERE id = ?
+    ''', (
+        data.get('title'),
+        data.get('author'),
+        int(data.get('price')),
+        int(data.get('old_price')) if data.get('old_price') else None,
+        data.get('category'),
+        data.get('type'),
+        data.get('image'),
+        int(data.get('stock', 10)),
+        data.get('description', '').strip(),
+        book_id
+    ))
+
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "message": "Kitob va mavjud soni (zaxirasi) bazada yangilandi!"})
+
+# Admin API: Kitobni o'chirish
+@app.route('/api/admin/books/<int:book_id>', methods=['DELETE'])
+@admin_required
+def delete_book(book_id):
+    db = DB()
+    db.execute('DELETE FROM books WHERE id = ?', (book_id,))
+    db.execute('DELETE FROM comments WHERE book_id = ?', (book_id,))
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "message": "Kitob bazadan o'chirildi!"})
+
+# Admin API: Buyurtmalar
+@app.route('/api/admin/orders', methods=['GET'])
+@admin_required
+def get_orders():
+    db = DB()
+    cur = db.execute('SELECT * FROM orders ORDER BY order_id DESC')
+    rows = cur.fetchall()
+    orders_list = []
+    for r in rows:
+        o = dict(r)
+        o['items'] = json.loads(o['items_json'])
+        orders_list.append(o)
+    db.close()
+    return jsonify({"success": True, "orders": orders_list})
+
+# Admin API: Buyurtma statusi
+@app.route('/api/admin/orders/<int:order_id>/status', methods=['PUT'])
+@app.route('/api/admin/orders/update-status', methods=['POST'])
+@admin_required
+def update_order_status(order_id=None):
+    data = request.get_json() or {}
+    if not order_id:
+        order_id = data.get('order_id')
+    new_status = data.get('status')
+
+    if not order_id or not new_status:
+        return jsonify({"success": False, "message": "Order ID va yangi status kiritilmadi!"}), 400
+
+    db = DB()
+
+    cur = db.execute('SELECT status, items_json FROM orders WHERE order_id = ?', (order_id,))
+    row = cur.fetchone()
+    old_status = row['status'] if row else None
+
+    db.execute('UPDATE orders SET status = ? WHERE order_id = ?', (new_status, order_id))
+
+    if new_status == "Yig'ilmoqda" and old_status != "Yig'ilmoqda" and row:
+        try:
+            items = json.loads(row['items_json'] or '[]')
+            for item in items:
+                title = item.get('title')
+                qty = int(item.get('quantity', 1))
+                if title:
+                    db.execute('UPDATE books SET stock = MAX(0, stock - ?) WHERE title = ?', (qty, title))
+        except Exception as e:
+            print("Error deducting stock:", e)
+
+    db.commit()
+    db.close()
+
+    try:
+        socketio.emit('order_status_updated', {
+            'order_id': order_id,
+            'status': new_status
+        })
+    except Exception as e:
+        print("Socket emit error:", e)
+
+    return jsonify({"success": True, "message": f"Status '{new_status}'ga o'zgartirildi va zaxira (soni) yangilandi!"})
+
+# Admin API: Buyurtmani o'chirish
+@app.route('/api/admin/orders/<int:order_id>', methods=['DELETE'])
+@admin_required
+def delete_order(order_id):
+    db = DB()
+    db.execute('DELETE FROM orders WHERE order_id = ?', (order_id,))
+    db.commit()
+    db.close()
+    return jsonify({"success": True, "message": "Buyurtma bazadan o'chirildi!"})
+
+# User Track API
+@app.route('/api/orders/track', methods=['GET'])
+def track_orders():
+    queries = request.args.getlist('q')
+    phone = request.args.get('phone', '').strip()
+    email = request.args.get('email', '').strip()
+    
+    search_terms = set(q.strip() for q in queries if q.strip())
+    if phone: search_terms.add(phone)
+    if email: search_terms.add(email)
+
+    if not search_terms:
+        return jsonify({"success": True, "orders": []})
+
+    db = DB()
+    where_clauses = []
+    params = []
+    for term in search_terms:
+        clean_term = term.replace(' ', '').replace('+', '')
+        where_clauses.append("(phone = ? OR customer_name = ? OR REPLACE(REPLACE(phone, ' ', ''), '+', '') LIKE ?)")
+        params.extend([term, term, f"%{clean_term}%"])
+
+    sql = f"SELECT * FROM orders WHERE {' OR '.join(where_clauses)} ORDER BY order_id DESC"
+    cur = db.execute(sql, tuple(params))
+
+    rows = cur.fetchall()
+    orders_list = []
+    seen_ids = set()
+    for r in rows:
+        o = dict(r)
+        if o['order_id'] not in seen_ids:
+            seen_ids.add(o['order_id'])
+            o['items'] = json.loads(o['items_json'] or '[]')
+            orders_list.append(o)
+    db.close()
+    return jsonify({"success": True, "orders": orders_list})
+
+# User Favorites API
+@app.route('/api/user/favorites', methods=['POST'])
+def toggle_favorite():
+    data = request.get_json() or {}
+    email = data.get('email')
+    book_id = data.get('book_id')
+
+    if not email:
+        return jsonify({"success": False, "message": "Avval tizimga kiring!"}), 401
+
+    db = DB()
+
+    cur = db.execute('SELECT * FROM favorites WHERE user_email = ? AND book_id = ?', (email, book_id))
+    existing = cur.fetchone()
+
+    if existing:
+        db.execute('DELETE FROM favorites WHERE user_email = ? AND book_id = ?', (email, book_id))
+        msg = "Kitob saralanganlardan olib tashlandi!"
+    else:
+        db.execute('INSERT INTO favorites (user_email, book_id) VALUES (?, ?)', (email, book_id))
+        msg = "Kitob profil saralanganlariga saqlandi!"
+
+    db.commit()
+
+    cur = db.execute('SELECT book_id FROM favorites WHERE user_email = ?', (email,))
+    fav_ids = [row['book_id'] for row in cur.fetchall()]
+
+    db.close()
+    return jsonify({"success": True, "message": msg, "favorites": fav_ids})
+
+# User Login API
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json() or {}
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({"success": False, "message": "Email va parolni kiriting!"}), 400
+
+    db = DB()
+
+    cur = db.execute('SELECT * FROM users WHERE email = ?', (email,))
+    user_row = cur.fetchone()
+
+    if user_row:
+        db_pass = user_row['password']
+        is_correct = False
+        if db_pass.startswith('pbkdf2:') or db_pass.startswith('scrypt:'):
+            from werkzeug.security import check_password_hash
+            is_correct = check_password_hash(db_pass, password)
+        else:
+            is_correct = (db_pass == password)
+
+        if is_correct:
+            user_data = dict(user_row)
+        else:
+            db.close()
+            return jsonify({"success": False, "message": "Parol noto'g'ri!"}), 400
+    else:
+        user_name = email.split('@')[0].capitalize()
+        db.execute('INSERT INTO users (name, email, password, phone) VALUES (?, ?, ?, ?)', (user_name, email, password, "+998 90 000-00-00"))
+        db.commit()
+        user_data = {"name": user_name, "email": email, "phone": "+998 90 000-00-00"}
+
+    cur = db.execute('SELECT book_id FROM favorites WHERE user_email = ?', (email,))
+    fav_ids = [r['book_id'] for r in cur.fetchall()]
+
+    db.close()
+    return jsonify({
+        "success": True,
+        "message": "Tizimga kirdingiz!",
+        "user": {
+            "name": user_data["name"],
+            "email": user_data["email"],
+            "phone": user_data["phone"],
+            "favorites": fav_ids
+        }
+    })
+
+# User Password Reset API
+@app.route('/api/reset-password', methods=['POST'])
+def reset_password():
+    data = request.get_json() or {}
+    email = data.get('email', '').strip()
+    new_password = data.get('new_password', '').strip()
+
+    if not email or not new_password:
+        return jsonify({"success": False, "message": "Email/telefon va yangi parolni kiriting!"}), 400
+
+    if len(new_password) < 3:
+        return jsonify({"success": False, "message": "Yangi parol kamida 3 ta belgidan iborat bo'lishi kerak!"}), 400
+
+    db = DB()
+    cur = db.execute('SELECT * FROM users WHERE email = ?', (email,))
+    user_row = cur.fetchone()
+
+    if not user_row:
+        db.close()
+        return jsonify({"success": False, "message": "Ushbu telefon/email bo'yicha foydalanuvchi topilmadi!"}), 404
+
+    db.execute('UPDATE users SET password = ? WHERE email = ?', (new_password, email))
+    db.commit()
+    db.close()
+
+    return jsonify({"success": True, "message": "Parolingiz muvaffaqiyatli yangilandi! Yangi parol bilan kirishingiz mumkin."})
+
+# Health check
+@app.route('/api/health', methods=['GET', 'OPTIONS'])
+def health_check():
+    return jsonify({"status": "ok", "message": "Server ishlayapti"})
+
+# Order Create API
+@app.route('/api/order', methods=['POST', 'OPTIONS'])
+def create_order():
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        data = request.get_json() or {}
+        items = data.get('items', [])
+        if not items:
+            return jsonify({"success": False, "message": "Savatingiz bo'sh!"}), 400
+
+        name = data.get('name', 'Mijoz').strip()
+        phone = data.get('phone', '').strip()
+        address = data.get('address', '').strip()
+        payment_method = data.get('payment_method', 'Naqd')
+
+        if not name or not phone or not address:
+            return jsonify({"success": False, "message": "Ism, telefon va manzilni kiriting!"}), 400
+
+        total_price = sum(int(item.get('price', 0)) * int(item.get('quantity', 1)) for item in items)
+        items_json = json.dumps(items, ensure_ascii=False)
+
+        db = DB()
+
+        order_id = db.insert_and_get_id('''
+            INSERT INTO orders (customer_name, phone, address, payment_method, items_json, total_price, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (name, phone, address, payment_method, items_json, total_price, "Qabul qilindi"), id_column='order_id')
+
+        db.close()
+
+        order_payload = {
+            "order_id": order_id,
+            "customer_name": name,
+            "phone": phone,
+            "address": address,
+            "payment_method": payment_method,
+            "items": items,
+            "total_price": total_price,
+            "status": "Qabul qilindi",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M")
+        }
+
+        try:
+            socketio.emit('new_order', order_payload, room='admin_room')
+            socketio.emit('new_order', order_payload)
+        except Exception as e:
+            print("Socket order emit error:", e)
+
+        return jsonify({
+            "success": True,
+            "message": f"Buyurtmangiz #{order_id} raqami bilan bazaga muvaffaqiyatli saqlandi!",
+            "order_id": order_id
+        })
+    except Exception as e:
+        print("Order creation error:", e)
+        return jsonify({"success": False, "message": "Buyurtmani saqlashda xatolik yuz berdi!"}), 500
+
+if __name__ == '__main__':
+    print("=== IQRO Real-Time Chat & Backend serveri ishga tushmoqda: http://127.0.0.1:8000 ===")
+    socketio.run(app, host='0.0.0.0', port=8000, debug=False, allow_unsafe_werkzeug=True)

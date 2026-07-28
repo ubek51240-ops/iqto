@@ -1,0 +1,713 @@
+================================================================
+  IQRO KITOB DO'KONI - BACKEND API YO'LLARI (DOCUMENTATION)
+================================================================
+  Base URL  : https://your-backend.com  (yoki http://localhost:8000)
+  Til       : Python / Flask
+  Fayl      : app.py
+  Sana      : 2026-07-28
+================================================================
+
+------------------------------------------------
+  AUTENTIFIKATSIYA (AUTHENTICATION)
+------------------------------------------------
+
+Admin himoyalangan yo'llar uchun 2 xil usul mavjud:
+
+  1) Session (brauzer cookie orqali)
+     - Admin login qilinganidan keyin avtomatik ishlaydi
+
+  2) Bearer Token (Header orqali)
+     - Login javobidan "token" olinadi
+     - Har so'rovga qo'shiladi:
+       Authorization: Bearer <token>
+
+------------------------------------------------
+  ADMIN AUTH API
+------------------------------------------------
+
+[1] Admin Login
+    METHOD  : POST
+    URL     : /api/admin/login
+    AUTH    : Yo'q (ochiq)
+    Body (JSON):
+      {
+        "username": "admin",
+        "password": "123"
+      }
+    Muvaffaqiyatli javob (200):
+      {
+        "success": true,
+        "message": "Admin paneliga xush kelibsiz!",
+        "token": "<bearer_token>"
+      }
+    Xato javob (401):
+      {
+        "success": false,
+        "message": "Login yoki parol noto'g'ri!"
+      }
+
+------------------------------------------------------------
+
+[2] Admin Session Tekshirish
+    METHOD  : GET
+    URL     : /api/admin/check-auth
+    URL     : /api/admin/check-session   (ikkalasi bir xil)
+    AUTH    : Bearer Token yoki Session
+    Javob (200):
+      {
+        "logged_in": true   // yoki false
+      }
+
+------------------------------------------------------------
+
+[3] Admin Logout
+    METHOD  : POST
+    URL     : /api/admin/logout
+    AUTH    : Yo'q
+    Javob (200):
+      {
+        "success": true,
+        "message": "Chiqib ketdingiz!"
+      }
+
+------------------------------------------------------------
+
+[4] Admin Login/Parol O'zgartirish
+    METHOD  : POST
+    URL     : /api/admin/change-credentials
+    AUTH    : Admin (Bearer Token yoki Session)
+    Body (JSON):
+      {
+        "old_password": "eski_parol",
+        "new_username": "yangi_login",
+        "new_password": "yangi_parol"
+      }
+    Muvaffaqiyatli javob (200):
+      {
+        "success": true,
+        "message": "Admin login va paroli muvaffaqiyatli o'zgartirildi!"
+      }
+    Xato javob (400):
+      {
+        "success": false,
+        "message": "Eski parolingiz noto'g'ri!"
+      }
+
+------------------------------------------------
+  SOZLAMALAR (SETTINGS) API
+------------------------------------------------
+
+[5] Sayt Sozlamalarini Olish
+    METHOD  : GET
+    URL     : /api/settings
+    AUTH    : Yo'q (ochiq)
+    Javob (200):
+      {
+        "success": true,
+        "settings": {
+          "store_address": "Buxoro shahar...",
+          "maps_url": "https://maps.google.com/...",
+          "phone_number": "+998 90 123-45-67",
+          "email_address": "info@iqro.uz",
+          "admin_username": "admin",
+          "admin_password": "..."
+        }
+      }
+
+------------------------------------------------------------
+
+[6] Sayt Sozlamalarini Yangilash
+    METHOD  : POST
+    URL     : /api/admin/settings
+    AUTH    : Admin (kerak)
+    Body (JSON):
+      {
+        "store_address": "Yangi manzil",
+        "maps_url": "https://maps.google.com/?q=...",
+        "phone_number": "+998 90 999-99-99",
+        "email_address": "yangi@email.uz",
+        "site_logo": "https://logo-url.com/logo.png"
+      }
+    Javob (200):
+      {
+        "success": true,
+        "message": "Do'kon ma'lumotlari bazada yangilandi!"
+      }
+
+------------------------------------------------
+  KITOBLAR (BOOKS) API
+------------------------------------------------
+
+[7] Kitoblar Ro'yxatini Olish
+    METHOD  : GET
+    URL     : /api/books
+    AUTH    : Yo'q (ochiq)
+    Query parametrlar (ixtiyoriy):
+      ?category=badiiy    // badiiy | biznes | diniy | psixologiya | discount | all
+      ?type=bestseller    // bestseller | new | discount | all
+      ?search=qodiriy     // sarlavha yoki muallif bo'yicha qidiruv
+    Javob (200):
+      {
+        "success": true,
+        "count": 6,
+        "books": [
+          {
+            "id": 1,
+            "title": "O'tkan Kunlar",
+            "author": "Abdulla Qodiriy",
+            "price": 45000,
+            "old_price": null,
+            "category": "badiiy",
+            "type": "bestseller",
+            "rating": 4.9,
+            "tag": "Top-1",
+            "tag_type": "primary",
+            "image": "https://...",
+            "stock": 10,
+            "description": "...",
+            "comments": [ ... ]
+          },
+          ...
+        ]
+      }
+
+------------------------------------------------------------
+
+[8] Kitob Qo'shish (Admin)
+    METHOD  : POST
+    URL     : /api/admin/books
+    AUTH    : Admin (kerak)
+    Body (JSON):
+      {
+        "title": "Kitob Nomi",
+        "author": "Muallif",
+        "price": 50000,
+        "old_price": 65000,        // ixtiyoriy
+        "category": "badiiy",      // badiiy | biznes | diniy | psixologiya
+        "type": "new",             // bestseller | new | discount
+        "rating": 5.0,
+        "tag": "Yangi",
+        "tag_type": "success",     // primary | success | danger
+        "image": "https://...",
+        "stock": 10,
+        "description": "Tavsif..."
+      }
+    Javob (200):
+      {
+        "success": true,
+        "message": "Yangi kitob bazaga qo'shildi!",
+        "id": 7
+      }
+
+------------------------------------------------------------
+
+[9] Kitobni Tahrirlash (Admin)
+    METHOD  : PUT
+    URL     : /api/admin/books/<book_id>
+    AUTH    : Admin (kerak)
+    Misol   : /api/admin/books/3
+    Body (JSON): (8-dagi kabi barcha maydonlar)
+    Javob (200):
+      {
+        "success": true,
+        "message": "Kitob va mavjud soni (zaxirasi) bazada yangilandi!"
+      }
+
+------------------------------------------------------------
+
+[10] Kitobni O'chirish (Admin)
+    METHOD  : DELETE
+    URL     : /api/admin/books/<book_id>
+    AUTH    : Admin (kerak)
+    Misol   : /api/admin/books/3
+    Javob (200):
+      {
+        "success": true,
+        "message": "Kitob bazadan o'chirildi!"
+      }
+
+------------------------------------------------------------
+
+[11] Kitobni Baholash
+    METHOD  : POST
+    URL     : /api/books/<book_id>/rate
+    AUTH    : Yo'q (ochiq)
+    Misol   : /api/books/1/rate
+    Body (JSON):
+      {
+        "rating": 4.5    // 1.0 dan 5.0 gacha
+      }
+    Javob (200):
+      {
+        "success": true,
+        "message": "Bahoingiz qabul qilindi! O'rtacha baho: 4.7",
+        "rating": 4.7,
+        "total_votes": 12
+      }
+
+------------------------------------------------
+  IZOHLAR (COMMENTS) API
+------------------------------------------------
+
+[12] Kitobga Izoh Qo'shish
+    METHOD  : POST
+    URL     : /api/books/<book_id>/comments
+    AUTH    : Yo'q (ochiq)
+    Misol   : /api/books/1/comments
+    Body (JSON):
+      {
+        "text": "Juda yaxshi kitob!",
+        "user": "Sarvar"      // ixtiyoriy, default: Anonim
+      }
+    Javob (200):
+      {
+        "success": true,
+        "message": "Izohingiz muvaffaqiyatli saqlandi!",
+        "comments": [ ... ]
+      }
+
+------------------------------------------------------------
+
+[13] Izohga Like Bosish / Olib Tashlash
+    METHOD  : POST
+    URL     : /api/comments/<comment_id>/like
+    AUTH    : Yo'q (ochiq)
+    Misol   : /api/comments/5/like
+    Body (JSON):
+      {
+        "action": "like"     // "like" yoki "unlike"
+      }
+    Javob (200):
+      {
+        "success": true,
+        "likes": 7,
+        "book_id": 1
+      }
+
+------------------------------------------------------------
+
+[14] Izohga Javob Yozish
+    METHOD  : POST
+    URL     : /api/comments/<comment_id>/reply
+    AUTH    : Yo'q (ochiq)
+    Misol   : /api/comments/5/reply
+    Body (JSON):
+      {
+        "text": "Javob matni",
+        "user": "Admin"     // ixtiyoriy, default: Anonim
+      }
+    Javob (200):
+      {
+        "success": true,
+        "message": "Javobingiz qo'shildi!",
+        "comments": [ ... ]
+      }
+
+------------------------------------------------
+  BUYURTMALAR (ORDERS) API
+------------------------------------------------
+
+[15] Buyurtma Yaratish
+    METHOD  : POST
+    URL     : /api/order
+    AUTH    : Yo'q (ochiq)
+    Body (JSON):
+      {
+        "name": "Sardor Toshmatov",
+        "phone": "+998901234567",
+        "address": "Buxoro, 12-uy",
+        "payment_method": "Naqd",     // "Naqd" | "Karta" | "Online"
+        "items": [
+          {
+            "title": "O'tkan Kunlar",
+            "price": 45000,
+            "quantity": 2
+          }
+        ]
+      }
+    Javob (200):
+      {
+        "success": true,
+        "message": "Buyurtmangiz #7 raqami bilan bazaga muvaffaqiyatli saqlandi!",
+        "order_id": 7
+      }
+
+------------------------------------------------------------
+
+[16] Buyurtmani Kuzatish (User)
+    METHOD  : GET
+    URL     : /api/orders/track
+    AUTH    : Yo'q (ochiq)
+    Query parametrlar:
+      ?phone=+998901234567
+      ?q=Sardor               // ism bo'yicha ham qidirish mumkin
+    Javob (200):
+      {
+        "success": true,
+        "orders": [
+          {
+            "order_id": 7,
+            "customer_name": "Sardor Toshmatov",
+            "phone": "+998901234567",
+            "address": "Buxoro, 12-uy",
+            "payment_method": "Naqd",
+            "items": [ ... ],
+            "total_price": 90000,
+            "status": "Qabul qilindi",
+            "created_at": "2026-07-28 12:00"
+          }
+        ]
+      }
+
+------------------------------------------------------------
+
+[17] Barcha Buyurtmalarni Ko'rish (Admin)
+    METHOD  : GET
+    URL     : /api/admin/orders
+    AUTH    : Admin (kerak)
+    Javob (200):
+      {
+        "success": true,
+        "orders": [ ... ]
+      }
+
+------------------------------------------------------------
+
+[18] Buyurtma Statusini O'zgartirish (Admin)
+    METHOD  : PUT
+    URL     : /api/admin/orders/<order_id>/status
+    yoki
+    METHOD  : POST
+    URL     : /api/admin/orders/update-status
+    AUTH    : Admin (kerak)
+
+    PUT misoli: /api/admin/orders/7/status
+    Body (JSON):
+      {
+        "status": "Yig'ilmoqda"
+      }
+
+    POST misoli Body:
+      {
+        "order_id": 7,
+        "status": "Yig'ilmoqda"
+      }
+
+    Mavjud statuslar:
+      - "Qabul qilindi"
+      - "Yig'ilmoqda"   (bu status kitob zaxirasini kamaytiradi)
+      - "Yo'lda"
+      - "Yetkazildi"
+      - "Bekor qilindi"
+
+    Javob (200):
+      {
+        "success": true,
+        "message": "Status 'Yig'ilmoqda'ga o'zgartirildi va zaxira (soni) yangilandi!"
+      }
+
+------------------------------------------------------------
+
+[19] Buyurtmani O'chirish (Admin)
+    METHOD  : DELETE
+    URL     : /api/admin/orders/<order_id>
+    AUTH    : Admin (kerak)
+    Misol   : /api/admin/orders/7
+    Javob (200):
+      {
+        "success": true,
+        "message": "Buyurtma bazadan o'chirildi!"
+      }
+
+------------------------------------------------
+  FOYDALANUVCHI (USER) API
+------------------------------------------------
+
+[20] Foydalanuvchi Login / Ro'yxatdan O'tish
+    METHOD  : POST
+    URL     : /api/login
+    AUTH    : Yo'q (ochiq)
+    Eslatma : Agar email topilmasa, avtomatik ro'yxatdan o'tkaziladi
+    Body (JSON):
+      {
+        "email": "user@example.com",
+        "password": "mypassword"
+      }
+    Muvaffaqiyatli javob (200):
+      {
+        "success": true,
+        "message": "Tizimga kirdingiz!",
+        "user": {
+          "name": "User",
+          "email": "user@example.com",
+          "phone": "+998 90 000-00-00",
+          "favorites": [1, 3, 5]
+        }
+      }
+    Xato (400):
+      {
+        "success": false,
+        "message": "Parol noto'g'ri!"
+      }
+
+------------------------------------------------------------
+
+[21] Parolni Tiklash
+    METHOD  : POST
+    URL     : /api/reset-password
+    AUTH    : Yo'q (ochiq)
+    Body (JSON):
+      {
+        "email": "user@example.com",
+        "new_password": "yangi_parol"
+      }
+    Javob (200):
+      {
+        "success": true,
+        "message": "Parolingiz muvaffaqiyatli yangilandi! ..."
+      }
+
+------------------------------------------------------------
+
+[22] Sevimlilar Ro'yxatini Yangilash (Toggle)
+    METHOD  : POST
+    URL     : /api/user/favorites
+    AUTH    : Yo'q (email bilan tekshiriladi)
+    Body (JSON):
+      {
+        "email": "user@example.com",
+        "book_id": 3
+      }
+    Javob (200):
+      {
+        "success": true,
+        "message": "Kitob profil saralanganlariga saqlandi!",
+        "favorites": [1, 3]
+      }
+
+------------------------------------------------
+  CHAT API (REST Fallback)
+------------------------------------------------
+
+[23] Chat Xabar Yuborish
+    METHOD  : POST
+    URL     : /api/chat/send
+    AUTH    : Yo'q (ochiq)
+    Body (JSON):
+      {
+        "session_id": "abc123",
+        "sender": "user",        // "user" yoki "admin"
+        "user_name": "Sardor",
+        "message": "Salom, yordam bera olasizmi?"
+      }
+    Javob (200):
+      {
+        "success": true
+      }
+
+------------------------------------------------------------
+
+[24] Chat Tarixini Ko'rish
+    METHOD  : GET
+    URL     : /api/chat/messages/<session_id>
+    AUTH    : Yo'q (ochiq)
+    Misol   : /api/chat/messages/abc123
+    Javob (200):
+      {
+        "success": true,
+        "messages": [
+          {
+            "id": 1,
+            "chat_session_id": "abc123",
+            "sender": "user",
+            "user_name": "Sardor",
+            "message": "Salom!",
+            "timestamp": "12:30",
+            "is_read": 0
+          },
+          ...
+        ]
+      }
+
+------------------------------------------------
+  ADMIN CHAT API
+------------------------------------------------
+
+[25] Barcha Chat Sessiyalarini Ko'rish
+    METHOD  : GET
+    URL     : /api/admin/chat-sessions
+    AUTH    : Admin (kerak)
+    Javob (200):
+      {
+        "success": true,
+        "total_unread": 5,
+        "sessions": [
+          {
+            "chat_session_id": "abc123",
+            "user_name": "Mijoz #1",
+            "last_time": "12:30",
+            "last_message": "Yordam bering!",
+            "unread_count": 2
+          },
+          ...
+        ]
+      }
+
+------------------------------------------------------------
+
+[26] Barcha Chat Tarixini Ko'rish
+    METHOD  : GET
+    URL     : /api/admin/chat-history
+    AUTH    : Admin (kerak)
+    Javob (200):
+      {
+        "success": true,
+        "sessions": {
+          "abc123": {
+            "user_name": "Mijoz #1",
+            "messages": [ ... ]
+          }
+        }
+      }
+
+------------------------------------------------------------
+
+[27] Chat Sessiyasini O'qilgan Deb Belgilash
+    METHOD  : POST
+    URL     : /api/admin/chat-sessions/<session_id>/read
+    AUTH    : Admin (kerak)
+    Misol   : /api/admin/chat-sessions/abc123/read
+    Javob (200):
+      {
+        "success": true
+      }
+
+------------------------------------------------------------
+
+[28] Chat Sessiyasini O'chirish
+    METHOD  : DELETE
+    URL     : /api/admin/chat-sessions/<session_id>
+    AUTH    : Admin (kerak)
+    Misol   : /api/admin/chat-sessions/abc123
+    Javob (200):
+      {
+        "success": true,
+        "message": "Chat suhbati muvaffaqiyatli o'chirildi!"
+      }
+
+------------------------------------------------
+  FAYL YUKLASH (UPLOAD) API
+------------------------------------------------
+
+[29] Rasm Yuklash (Admin)
+    METHOD  : POST
+    URL     : /api/admin/upload
+    AUTH    : Admin (kerak)
+    Content-Type : multipart/form-data
+    Form maydon nomi: "file" yoki "image"
+    Ruxsat etilgan formatlar: jpg, jpeg, png, gif, webp
+    Javob (200):
+      {
+        "success": true,
+        "message": "Rasm muvaffaqiyatli yuklandi!",
+        "url": "/uploads/1722160000_rasm.jpg",
+        "image_url": "/uploads/1722160000_rasm.jpg"
+      }
+
+------------------------------------------------
+  BOSHQA API YO'LLARI
+------------------------------------------------
+
+[30] Sog'liqni Tekshirish (Health Check)
+    METHOD  : GET
+    URL     : /api/health
+    AUTH    : Yo'q (ochiq)
+    Javob (200):
+      {
+        "status": "ok",
+        "message": "Server ishlayapti"
+      }
+
+------------------------------------------------
+  SOCKET.IO REAL-TIME VOQEALAR
+------------------------------------------------
+
+  Real-time chat va buyurtma bildirishnomalar uchun
+  Socket.IO ishlatiladi. REST API bilan bir xil backendda.
+
+  [Ulanish]
+    const socket = io("https://your-backend.com");
+
+  [Foydalanuvchi Chat Xonasiga Qo'shilish]
+    socket.emit("join_chat", { session_id: "abc123" });
+
+  [Admin Xonasiga Qo'shilish]
+    socket.emit("join_admin");
+
+  [Xabar Yuborish]
+    socket.emit("send_message", {
+      session_id: "abc123",
+      sender: "user",
+      user_name: "Sardor",
+      message: "Salom!"
+    });
+
+  [Xabar Olish]
+    socket.on("receive_message", (data) => {
+      // data: { session_id, sender, user_name, message, timestamp, total_unread }
+    });
+
+  [Yangi Buyurtma Bildirishnomasi - Admin]
+    socket.on("new_order", (order) => {
+      // order: { order_id, customer_name, phone, items, total_price, status, ... }
+    });
+
+  [Buyurtma Statusi O'zgardi]
+    socket.on("order_status_updated", (data) => {
+      // data: { order_id, status }
+    });
+
+------------------------------------------------
+  MA'LUMOTLAR BAZASI JADVALLARI (DATABASE SCHEMA)
+------------------------------------------------
+
+  books:
+    id, title, author, price, old_price, category, type,
+    rating, tag, tag_type, image, stock, description
+
+  orders:
+    order_id, customer_name, phone, address, payment_method,
+    items_json, total_price, status, created_at
+
+  users:
+    id, name, email, password, phone
+
+  favorites:
+    id, user_email, book_id
+
+  comments:
+    id, book_id, user_name, comment_text, likes,
+    replies_json, created_date
+
+  chat_messages:
+    id, chat_session_id, sender, user_name, message,
+    timestamp, is_read
+
+  settings:
+    key, value
+
+------------------------------------------------
+  XATO KODLARI
+------------------------------------------------
+
+  200  - Muvaffaqiyatli
+  204  - OPTIONS (CORS preflight)
+  400  - Noto'g'ri ma'lumot kiritildi
+  401  - Autentifikatsiya xatosi (login/parol)
+  403  - Ruxsat yo'q (admin kerak)
+  404  - Ma'lumot topilmadi
+  500  - Server ichki xatosi
+
+================================================================
+  Tayyorladi: IQRO Backend Team | 2026
+================================================================
